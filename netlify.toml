@@ -1,0 +1,10 @@
+# Netlify: frontend monorepo ichidagi frontend/ papkada, sayt domen ildizida (/) ishlaydi
+[build]
+  base = "frontend"
+  command = "npm run build"
+  publish = "dist"
+
+[build.environment]
+  NODE_VERSION = "20"
+  VITE_BASE = "/"
+  VITE_BACKEND_URL = "https://codekids-api.onrender.com"
