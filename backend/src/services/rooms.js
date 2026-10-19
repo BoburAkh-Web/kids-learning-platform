@@ -3,7 +3,7 @@ import { query, withTransaction } from '../db.js';
 import { AppError } from '../errors.js';
 
 // 0, O, 1, I belgilari chiqarilgan: bolalar kodni o'qiganda adashmasligi uchun
-const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+const CODE_ALPHABET = '0123456789';
 const CODE_LENGTH = 6;
 const CODE_ATTEMPTS = 5;
 const ROOM_TTL_MS = 2 * 60 * 60 * 1000;
@@ -56,8 +56,8 @@ export async function createRoom(hostId, input) {
       throw new AppError(404, 'CONTENT_NOT_FOUND', 'Kontent topilmadi yoki nashr etilmagan');
     }
         const expected = data.game_type === 'typing' ? 'typing_text' : 'questions';
-    if (data.game_type === 'labyrinth' && rows[0].type === 'questions' && (rows[0].data?.questions?.length ?? 0) < 3) {
-      throw new AppError(400, 'TOO_FEW_QUESTIONS', "Labirint uchun kamida 3 ta savol kerak");
+    if (data.game_type === 'labyrinth' && rows[0].type === 'questions' && (rows[0].data?.questions?.length ?? 0) < 5) {
+      throw new AppError(400, 'TOO_FEW_QUESTIONS', "Labirint uchun kamida 5 ta savol kerak");
     }
     if (rows[0].type !== expected) {
       throw new AppError(400, 'CONTENT_TYPE_MISMATCH', "Kontent turi o'yinga mos emas");

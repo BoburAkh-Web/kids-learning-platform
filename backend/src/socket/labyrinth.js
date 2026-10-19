@@ -1,7 +1,9 @@
+import { z } from 'zod';
 import { query } from '../db.js';
 import { AppError } from '../errors.js';
 import { logger } from '../logger.js';
-import { generateMaze, toRows, exitCell, MOVES, mulberry32 } from '../utils/mazeGenerator.js';
+import { MOVES, mulberry32 } from '../utils/mazeGenerator.js';
+import { buildLevels, LEVEL_COUNT, MIN_QUESTIONS, START } from '../utils/levels.js';
 import { joinRoomSchema, labyrinthMoveSchema, labyrinthAnswerSchema } from '../schemas/rooms.js';
 import { getRoom, setRoom, deleteRoom } from './roomStore.js';
 import { wrapHandler } from './rooms.js';
@@ -12,9 +14,12 @@ const LOCK_MS = 5000;
 const ANSWER_SCORE = 10;
 const RANK_BONUS = [50, 30, 20];
 const DEFAULT_BONUS = 10;
-const MIN_QUESTIONS = 3;
-const START = { x: 1, y: 1 };
 const FINISHED_ROOM_TTL_MS = 5 * 60 * 1000;
+const HERO_COUNT = 8;
+// Hamma tugatgach yakuniy ekran darhol emas, oxirgi animatsiya ko'rinib ulgurgach chiqadi
+const ALL_DONE_DELAY_MS = 2500;
+
+const heroPayload = joinRoomSchema.extend({ hero: z.number().int().min(1).max(HERO_COUNT) });
 
 const channel = (code) => `room:${code}`;
 const cellKey = (x, y) => `${x},${y}`;
@@ -51,63 +56,6 @@ function shuffle(items, rand) {
   return a;
 }
 
-// Start'dan finish'gacha asosiy yo'l katakchalari (BFS)
-function mainPathKeys(grid, size) {
-  const end = exitCell(size);
-  const prev = new Map([[cellKey(START.x, START.y), null]]);
-  const queue = [START];
-
-  while (queue.length > 0) {
-    const cur = queue.shift();
-    if (cur.x === end.x && cur.y === end.y) break;
-
-    for (const { dx, dy } of Object.values(MOVES)) {
-      const nx = cur.x + dx;
-      const ny = cur.y + dy;
-      const k = cellKey(nx, ny);
-      if (nx < 0 || ny < 0 || nx >= size || ny >= size) continue;
-      if (grid[ny][nx] === 1 || prev.has(k)) continue;
-      prev.set(k, cellKey(cur.x, cur.y));
-      queue.push({ x: nx, y: ny });
-    }
-  }
-
-  const path = new Set();
-  let k = cellKey(end.x, end.y);
-  while (typeof k === 'string' && prev.has(k)) {
-    path.add(k);
-    k = prev.get(k);
-  }
-  return path;
-}
-
-// 6–12 checkpoint, yarmi asosiy yo'lda. Start va finish checkpoint emas.
-function pickCheckpoints(grid, size, seed) {
-  const count = Math.min(12, Math.max(6, Math.floor(size / 2)));
-  const end = exitCell(size);
-  const onPath = mainPathKeys(grid, size);
-
-  const cells = [];
-  for (let y = 1; y < size - 1; y += 2) {
-    for (let x = 1; x < size - 1; x += 2) {
-      if (grid[y][x] === 1) continue;
-      if ((x === START.x && y === START.y) || (x === end.x && y === end.y)) continue;
-      cells.push({ x, y });
-    }
-  }
-
-  const rand = mulberry32(seed ^ 0x5bd1e995);
-  const pathCells = shuffle(cells.filter((c) => onPath.has(cellKey(c.x, c.y))), rand);
-  const offCells = shuffle(cells.filter((c) => !onPath.has(cellKey(c.x, c.y))), rand);
-
-  const half = Math.ceil(count / 2);
-  const chosen = [...pathCells.slice(0, half), ...offCells.slice(0, count - half)];
-  const rest = [...pathCells.slice(half), ...offCells.slice(count - half)];
-  while (chosen.length < count && rest.length > 0) chosen.push(rest.shift());
-
-  return shuffle(chosen, rand);
-}
-
 function bonusFor(rank) {
   return RANK_BONUS[rank - 1] ?? DEFAULT_BONUS;
 }
@@ -120,6 +68,53 @@ function isPendingShape(v) {
   return Boolean(v) && typeof v === 'object'
     && Number.isInteger(v.index) && Array.isArray(v.perm)
     && Number.isInteger(v.at?.x) && Number.isInteger(v.at?.y);
+}
+
+// ---------- Level yordamchilari ----------
+
+// O'yinchi turgan level (1..LEVEL_COUNT)
+function levelOf(room, player) {
+  return room.levels[player.level - 1];
+}
+
+// Shu leveldagi savollar: jami va qolgani
+function questionsInfo(room, player) {
+  const total = levelOf(room, player).checkpoints.length;
+  return { total, left: Math.max(0, total - player.cleared.length) };
+}
+
+// Finish va bayroq faqat shu leveldagi hamma savolga javob berilgach ochiladi
+function exitRevealed(room, player) {
+  return questionsInfo(room, player).left === 0;
+}
+
+// Klientga yuboriladigan level ma'lumoti. Yashirin finish koordinatasi ochilmaguncha yuborilmaydi.
+function levelPayload(room, player) {
+  const L = levelOf(room, player);
+  return {
+    level: L.level,
+    levels: LEVEL_COUNT,
+    grid: L.rows,
+    size: L.size,
+    start: L.start,
+    exit: exitRevealed(room, player) ? L.exit : null,
+    checkpoints: L.checkpoints,
+    questions: questionsInfo(room, player),
+  };
+}
+
+// Ustoz o'ynamaydi, shuning uchun hamma levelni va finishni ko'radi
+function hostLevels(room) {
+  return room.levels.map((L) => ({
+    level: L.level,
+    levels: LEVEL_COUNT,
+    grid: L.rows,
+    size: L.size,
+    start: L.start,
+    exit: L.exit,
+    checkpoints: L.checkpoints,
+    questions: { total: L.checkpoints.length, left: L.checkpoints.length },
+  }));
 }
 
 function questionView(room, pending) {
@@ -146,7 +141,7 @@ function serveQuestion(room, player, at) {
 async function loadLabyrinthRoom(code) {
   const { rows } = await query(
     `SELECT r.id, r.host_id, r.code, r.game_type, r.status, r.duration_minutes,
-            r.started_at, r.ended_at, r.settings, c.data AS content_data
+            r.started_at, r.ended_at, r.settings, c.data AS content_data, c.title AS content_title
        FROM game_rooms r
        LEFT JOIN contents c ON c.id = r.content_id
       WHERE r.code = $1`,
@@ -160,13 +155,12 @@ async function loadLabyrinthRoom(code) {
 
   const questions = row.content_data?.questions ?? [];
   if (questions.length < MIN_QUESTIONS) {
-    throw new AppError(500, 'ROOM_MISCONFIGURED', "Xonada kamida 3 ta savol bo'lishi kerak");
+    throw new AppError(500, 'ROOM_MISCONFIGURED', `Xonada kamida ${MIN_QUESTIONS} ta savol bo'lishi kerak`);
   }
 
-  const size = row.settings.rows;
+  // O'lcham va qiyinlik endi leveldan keladi (settings.rows ishlatilmaydi)
   const seed = row.settings.labyrinth_seed;
-  const grid = generateMaze(seed, size);
-  const checkpoints = pickCheckpoints(grid, size, seed);
+  const levels = buildLevels(seed, questions.length);
 
   const { rows: fin } = await query(
     'SELECT count(*)::int AS n FROM game_players WHERE room_id = $1 AND finished = true AND lives > 0',
@@ -175,27 +169,33 @@ async function loadLabyrinthRoom(code) {
 
   const durationMs = row.duration_minutes * 60 * 1000;
   const startedAt = row.started_at ? new Date(row.started_at).getTime() : null;
+  const mode = row.settings.mode === 'kids' ? 'kids' : 'standard';
 
   return {
     gameType: 'labyrinth',
-    mode: row.settings.mode === 'kids' ? 'kids' : 'standard',
+    mode,
+    // Ustoz ekranidagi qisqa ma'lumot (mavzu, savollar soni, vaqt, jonlar)
+    info: {
+      title: row.content_title ?? null,
+      questions: questions.length,
+      levels: LEVEL_COUNT,
+      minutes: row.duration_minutes,
+      lives: mode === 'kids' ? null : START_LIVES,
+    },
     id: row.id,
     code: row.code,
     hostId: row.host_id,
     status: row.status,
-    size,
     seed,
-    grid,
-    rows: toRows(grid),
+    levels,
     questions,
-    checkpoints,
-    checkpointKeys: new Set(checkpoints.map((c) => cellKey(c.x, c.y))),
     finishCount: fin[0].n,
     durationMs,
     startedAt,
     endsAt: startedAt ? startedAt + durationMs : null,
     endedAt: row.ended_at ? new Date(row.ended_at).getTime() : null,
     endTimer: null,
+    doneTimer: null,
     players: new Map(),
   };
 }
@@ -229,10 +229,12 @@ async function ensurePlayer(room, userId) {
   if (row.kicked) throw new AppError(403, 'KICKED', "Siz bu xonadan chiqarilgansiz");
 
   const saved = row.state ?? {};
+  const level = Number.isInteger(saved.level) && saved.level >= 1 && saved.level <= LEVEL_COUNT ? saved.level : 1;
   const player = {
     id: row.id,
     userId,
     nickname: row.nickname,
+    level,
     x: row.position_x ?? START.x,
     y: row.position_y ?? START.y,
     lives: room.mode === 'kids' ? null : (row.lives ?? START_LIVES),
@@ -245,6 +247,9 @@ async function ensurePlayer(room, userId) {
     qPos: Number.isInteger(saved.qPos) ? saved.qPos : 0,
     qOrder: shuffle([...room.questions.keys()], rngFor(`${room.seed}:${row.id}:order`)),
     lockedUntil: saved.lockedUntil ?? null,
+    hero: Number.isInteger(saved.hero) ? saved.hero : null,
+    answered: Number.isInteger(saved.answered) ? saved.answered : 0,
+    right: Number.isInteger(saved.right) ? saved.right : 0,
     lastMoveAt: 0,
   };
   room.players.set(userId, player);
@@ -265,11 +270,15 @@ async function savePlayer(room, p) {
       p.score,
       p.finished,
       JSON.stringify({
+        level: p.level,
         cleared: p.cleared,
         pendingQuestion: p.pendingQuestion,
         qPos: p.qPos,
         rank: p.rank,
         lockedUntil: p.lockedUntil,
+        hero: p.hero,
+        answered: p.answered,
+        right: p.right,
       }),
     ]
   );
@@ -282,6 +291,7 @@ function publicPlayers(room) {
     .map((p) => ({
       id: p.id,
       nickname: p.nickname,
+      level: p.level,
       x: p.x,
       y: p.y,
       lives: p.lives,
@@ -290,6 +300,9 @@ function publicPlayers(room) {
       eliminated: p.eliminated,
       rank: p.rank,
       kicked: p.kicked === true,
+      hero_id: p.hero ?? null,
+      answered: p.answered ?? 0,
+      right: p.right ?? 0,
     }))
     .sort((a, b) => b.score - a.score);
 }
@@ -297,6 +310,7 @@ function publicPlayers(room) {
 function playerView(room, p) {
   return {
     id: p.id,
+    level: p.level,
     cleared: p.cleared,
     x: p.x,
     y: p.y,
@@ -307,6 +321,7 @@ function playerView(room, p) {
     rank: p.rank,
     question: p.pendingQuestion ? questionView(room, p.pendingQuestion) : null,
     lockedUntil: p.lockedUntil,
+    hero_id: p.hero ?? null,
   };
 }
 
@@ -326,11 +341,13 @@ function broadcastLater(io, room) {
 
 // ---------- Tugatish va taymer ----------
 
-export async function finishRoom(io, room) {
+// reason: 'time' (vaqt tugadi), 'all_done' (hamma tugatdi), 'closed' (ustoz yopdi)
+export async function finishRoom(io, room, reason = 'time') {
   if (room.status === 'finished') return;
   room.status = 'finished';
   room.endedAt = Date.now();
   if (room.endTimer) clearTimeout(room.endTimer);
+  if (room.doneTimer) clearTimeout(room.doneTimer);
 
   await query(
     `UPDATE game_rooms SET status = 'finished', ended_at = $2 WHERE id = $1`,
@@ -341,7 +358,7 @@ export async function finishRoom(io, room) {
   }
 
   broadcast(io, room);
-  io.to(channel(room.code)).emit('labyrinth:finished', { players: publicPlayers(room) });
+  io.to(channel(room.code)).emit('labyrinth:finished', { players: publicPlayers(room), reason });
   setTimeout(() => deleteRoom(room.code), FINISHED_ROOM_TTL_MS).unref();
 }
 
@@ -351,6 +368,21 @@ function scheduleEnd(io, room) {
   room.endTimer = setTimeout(() => {
     finishRoom(io, room).catch((err) => logger.error({ err }, 'Labirint tugatishda xato'));
   }, delay);
+}
+
+// Hamma o'yinchi tugatgan bo'lsa (marraga yetgan yoki joni tugagan), vaqtni kutmasdan yopamiz.
+// Chiqarilganlar hisobga olinmaydi.
+function allDone(room) {
+  const ps = [...room.players.values()].filter((p) => !p.kicked);
+  return ps.length > 0 && ps.every((p) => p.finished);
+}
+
+export function finishIfAllDone(io, room) {
+  if (room.status !== 'active' || room.doneTimer || !allDone(room)) return;
+  room.doneTimer = setTimeout(() => {
+    room.doneTimer = null;
+    if (allDone(room)) finishRoom(io, room, 'all_done').catch((err) => logger.error({ err }, 'Labirint tugatishda xato'));
+  }, ALL_DONE_DELAY_MS);
 }
 
 // ---------- Event handlerlar ----------
@@ -380,13 +412,12 @@ export function registerLabyrinthHandlers(socket) {
     s.join(channel(code));
     s.data.labyrinthCode = code;
 
+    const all = player ? null : hostLevels(room);
     s.emit('labyrinth:init', {
-      grid: room.rows,
-      size: room.size,
-      start: START,
-      exit: exitCell(room.size),
-      checkpoints: room.checkpoints,
+      ...(player ? levelPayload(room, player) : all[0]),
+      allLevels: all, // faqat ustoz uchun: hamma levelni almashtirib ko'rish
       mode: room.mode,
+      info: room.info,
       status: room.status,
       endsAt: room.endsAt,
       serverNow: Date.now(),
@@ -395,6 +426,26 @@ export function registerLabyrinthHandlers(socket) {
     });
 
     return { joined: true, playerId: player ? player.id : null };
+  });
+
+  // Qahramon tanlash: faqat o'yin boshlanguncha. Tanlov o'yinchi holatida (state) saqlanadi.
+  wrapHandler(socket, 'labyrinth:hero', async (s, payload) => {
+    const user = requireUser(s);
+    const { code, hero } = heroPayload.parse(payload);
+    const room = await getRoomOrLoad(code);
+    const player = await ensurePlayer(room, user.id);
+    if (!player) {
+      throw new AppError(403, 'NOT_A_PARTICIPANT', "Bu xonaga qo'shilmagansiz");
+    }
+    if (room.status !== 'waiting') {
+      throw new AppError(409, 'ROOM_NOT_WAITING', "Qahramonni faqat o'yin boshlanguncha almashtirish mumkin");
+    }
+    if (player.hero !== hero) {
+      player.hero = hero;
+      await savePlayer(room, player);
+      broadcastLater(io, room);
+    }
+    return { hero };
   });
 
   wrapHandler(socket, 'labyrinth:start', async (s, payload) => {
@@ -464,10 +515,11 @@ export function registerLabyrinthHandlers(socket) {
       throw new AppError(409, 'QUESTION_PENDING', 'Avval savolga javob bering');
     }
 
+    const L = levelOf(room, player);
     const mv = MOVES[direction];
     const nx = player.x + mv.dx;
     const ny = player.y + mv.dy;
-    if (nx < 0 || ny < 0 || nx >= room.size || ny >= room.size || room.grid[ny][nx] === 1) {
+    if (nx < 0 || ny < 0 || nx >= L.size || ny >= L.size || L.grid[ny][nx] === 1) {
       throw new AppError(400, 'BLOCKED', "Bu yo'nalishda devor bor");
     }
 
@@ -476,20 +528,32 @@ export function registerLabyrinthHandlers(socket) {
     player.lastMoveAt = now;
 
     let question = null;
-    const ex = exitCell(room.size);
+    let next = null;
 
-    if (nx === ex.x && ny === ex.y) {
-      room.finishCount += 1;
-      player.rank = room.finishCount;
-      player.finished = true;
-      player.score += bonusFor(player.rank);
-    } else if (room.checkpointKeys.has(cellKey(nx, ny)) && !isCleared(player, nx, ny)) {
+    if (nx === L.exit.x && ny === L.exit.y && exitRevealed(room, player)) {
+      if (player.level < LEVEL_COUNT) {
+        // Keyingi levelga o'tish: yangi labirint, start'dan boshlanadi
+        player.level += 1;
+        player.cleared = [];
+        player.pendingQuestion = null;
+        player.x = START.x;
+        player.y = START.y;
+        next = levelPayload(room, player);
+      } else {
+        room.finishCount += 1;
+        player.rank = room.finishCount;
+        player.finished = true;
+        player.score += bonusFor(player.rank);
+      }
+    } else if (L.checkpointKeys.has(cellKey(nx, ny)) && !isCleared(player, nx, ny)) {
       question = serveQuestion(room, player, { x: nx, y: ny });
     }
+    // Aks holda finish katagi (savollar tugamaguncha) oddiy yo'lak: hech narsa bo'lmaydi
 
     await savePlayer(room, player);
     broadcastLater(io, room);
-    return { x: nx, y: ny, finished: player.finished, question };
+    if (player.finished) finishIfAllDone(io, room);
+    return { x: player.x, y: player.y, finished: player.finished, question, next };
   });
 
   wrapHandler(socket, 'labyrinth:answer', async (s, payload) => {
@@ -518,6 +582,8 @@ export function registerLabyrinthHandlers(socket) {
     const correct = pending.perm[choice] === q.answer;
     const correctIndex = pending.perm.indexOf(q.answer);
     player.pendingQuestion = null;
+    player.answered = (player.answered ?? 0) + 1;
+    if (correct) player.right = (player.right ?? 0) + 1;
     const now = Date.now();
 
     if (correct) {
@@ -542,7 +608,9 @@ export function registerLabyrinthHandlers(socket) {
 
     await savePlayer(room, player);
     broadcastLater(io, room);
+    if (player.finished) finishIfAllDone(io, room);
 
+    const revealed = exitRevealed(room, player);
     return {
       correct,
       correctIndex,
@@ -553,6 +621,9 @@ export function registerLabyrinthHandlers(socket) {
       x: player.x,
       y: player.y,
       lockedUntil: player.lockedUntil,
+      level: player.level,
+      questions: questionsInfo(room, player),
+      exit: revealed ? levelOf(room, player).exit : null, // oxirgi savoldan keyin bayroq ochiladi
     };
   });
 }
