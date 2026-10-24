@@ -1,5 +1,5 @@
 import { useState, type SubmitEvent } from "react";
-import { Link } from "react-router";
+import { Link, useNavigate } from "react-router";
 import {
   CodeXml,
   Keyboard,
@@ -14,6 +14,7 @@ import { APP_NAME } from "../config";
 import { login } from "../api/auth";
 import { ApiError } from "../api/client";
 import { useToast } from "../hooks/useToast";
+import useAuth from "../auth/useAuth";
 
 export default function Login() {
   const [email, setEmail] = useState("");
@@ -21,7 +22,8 @@ export default function Login() {
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const toast = useToast();
-
+  const { login } = useAuth();
+  const navigate = useNavigate();
   async function handleSubmit(e: SubmitEvent<HTMLFormElement>) {
     e.preventDefault();
     console.log(email, password);
@@ -36,6 +38,8 @@ export default function Login() {
       }
     } finally {
       setLoading(false);
+      toast.success("xush kelibsiz");
+      navigate("/");
     }
   }
 
