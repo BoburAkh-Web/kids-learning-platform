@@ -28,10 +28,9 @@ export default function Login() {
     setLoading(true);
     try {
       const data = await login(email, password);
-      console.log("Kirdi : ", data);
     } catch (err) {
       if (err instanceof ApiError) {
-        toast.error("Email yoki parol noto'g'ri");
+        toast.error(err.message);
       } else {
         console.log("server bilan boglanib bolmadi");
       }
