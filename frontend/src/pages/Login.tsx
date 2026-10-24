@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useState, type SubmitEvent } from "react";
 import { Link } from "react-router";
 import {
   CodeXml,
@@ -11,15 +11,33 @@ import {
   EyeOff,
 } from "lucide-react";
 import { APP_NAME } from "../config";
+import { login } from "../api/auth";
+import { ApiError } from "../api/client";
 
 export default function Login() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
 
-  function handleSubmit(e: FormEvent<HTMLFormElement>) {
+  async function handleSubmit(e: SubmitEvent<HTMLFormElement>) {
     e.preventDefault();
     console.log(email, password);
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await login(email, password);
+      console.log("Kirdi : ", data);
+    } catch (err) {
+      if (err instanceof ApiError) {
+        setError(err.message);
+      } else {
+        console.log("server bilan boglanib bolmadi");
+      }
+    } finally {
+      setLoading(false);
+    }
   }
 
   function toggleShowPassword() {
