@@ -1,3 +1,4 @@
+import { useState, type FormEvent } from "react";
 import { Link } from "react-router";
 import {
   CodeXml,
@@ -7,22 +8,22 @@ import {
   Mail,
   Lock,
   Eye,
+  EyeOff,
 } from "lucide-react";
 import { APP_NAME } from "../config";
-import { useState } from "react";
 
 export default function Login() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [showPassword, setShowPassword] = useState(true);
-  function handleSubmit(e: any) {
+  const [showPassword, setShowPassword] = useState(false);
+
+  function handleSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
     console.log(email, password);
-    setEmail("");
-    setPassword("");
   }
-  function toggleShowPassword(password: any) {
-    setShowPassword((password) => !password);
+
+  function toggleShowPassword() {
+    setShowPassword((prev) => !prev);
   }
   return (
     <div className="min-h-screen bg-cream text-ink">
@@ -49,7 +50,6 @@ export default function Login() {
           </div>
         </section>
 
-        {/* O'ng tomon: forma */}
         <section>
           <form
             onSubmit={handleSubmit}
@@ -79,7 +79,7 @@ export default function Login() {
               <Lock className="pointer-events-none absolute left-5 top-1/2 size-5 -translate-y-1/2 text-ink/60" />
               <input
                 id="password"
-                type="password"
+                type={showPassword ? "text" : "password"}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 placeholder="Parolingizni yozing"
@@ -87,11 +87,17 @@ export default function Login() {
               />
               <button
                 type="button"
-                aria-label="Parolni ko'rsatish"
-                onClick={() => toggleShowPassword(showPassword)}
+                aria-label={
+                  showPassword ? "Parolni yashirish" : "Parolni ko'rsatish"
+                }
+                onClick={toggleShowPassword}
                 className="absolute right-5 top-1/2 -translate-y-1/2 text-ink/60 hover:text-ink"
               >
-                {showPassword && <Eye className="size-5" />}
+                {showPassword ? (
+                  <EyeOff className="size-5" />
+                ) : (
+                  <Eye className="size-5" />
+                )}
               </button>
             </div>
 
