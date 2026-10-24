@@ -13,25 +13,25 @@ import {
 import { APP_NAME } from "../config";
 import { login } from "../api/auth";
 import { ApiError } from "../api/client";
+import { useToast } from "../hooks/useToast";
 
 export default function Login() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const toast = useToast();
 
   async function handleSubmit(e: SubmitEvent<HTMLFormElement>) {
     e.preventDefault();
     console.log(email, password);
     setLoading(true);
-    setError(null);
     try {
       const data = await login(email, password);
       console.log("Kirdi : ", data);
     } catch (err) {
       if (err instanceof ApiError) {
-        setError(err.message);
+        toast.error("Email yoki parol noto'g'ri");
       } else {
         console.log("server bilan boglanib bolmadi");
       }
@@ -121,9 +121,10 @@ export default function Login() {
 
             <button
               type="submit"
+              disabled={loading}
               className="mt-6 w-full rounded-full bg-ink py-4 font-display text-lg font-semibold text-white hover:bg-ink/90"
             >
-              Kirish
+              {loading ? "Kirilmoqda..." : "Kirish"}
             </button>
           </form>
 
