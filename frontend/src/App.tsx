@@ -3,11 +3,13 @@ import Home from "./pages/Home";
 import Login from "./pages/Login";
 import NotFound from "./pages/NotFound";
 import Layout from "./components/Layout";
+import Register from "./pages/Register";
 
 function App() {
   return (
     <Routes>
       <Route path="/login" element={<Login />} />
+      <Route path="/register" element={<Register />} />
       <Route element={<Layout />}>
         <Route path="/" element={<Home />} />
         <Route path="*" element={<NotFound />} />
